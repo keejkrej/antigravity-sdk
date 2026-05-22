@@ -1,4 +1,4 @@
-import { Agent } from "../src/index.js";
+import { Agent, policy } from "../src/index.js";
 import { Effect } from "effect";
 
 // Simple calculator tool definition
@@ -34,25 +34,27 @@ const main = Effect.gen(function* () {
   const agent = new Agent({
     systemInstructions: "You are a helpful mathematical assistant. Use the calculator tool for any math questions.",
     tools: [calculator],
+    policies: [policy.allow_all()],
     geminiConfig: {
-      modelName: "gemini-2.5-flash",
+      modelName: "gemini-3.5-flash",
     },
   });
 
   console.log("Starting agent...");
-  yield* agent.start();
+  yield* Effect.promise(() => agent.start());
 
   console.log("Sending chat prompt to Agent...");
-  const response = yield* agent.chat("What is 12345 * 6789? Please use your calculator tool.");
+  const response = yield* Effect.promise(() => agent.chat("What is 12345 * 6789? Please use your calculator tool."));
 
   console.log("\n--- Agent Response ---");
   console.log(response.text);
   console.log("----------------------\n");
 
   console.log("Stopping agent...");
-  yield* agent.stop();
+  yield* Effect.promise(() => agent.stop());
 });
 
 Effect.runPromise(main).catch((err) => {
   console.error("Execution failed:", err);
 });
+
