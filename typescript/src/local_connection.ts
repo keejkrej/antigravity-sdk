@@ -6,6 +6,9 @@ import { spawn, ChildProcess } from "node:child_process";
 import { Readable } from "node:stream";
 import WebSocket from "ws";
 import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import { fileURLToPath } from "node:url";
 import { HookRunner } from "./hooks/hook_runner.ts";
 import { TurnContext, OperationContext } from "./hooks/hooks.ts";
 import { ToolRunner } from "./tools/tool_runner.ts";
@@ -44,6 +47,49 @@ export function normalizeWirePath(p: string): string {
   } catch (_) {}
   return p;
 }
+
+export function normalizeStepState(state: any): Types.StepState {
+  if (state === undefined || state === null) {
+    return Types.StepState.STATE_UNSPECIFIED;
+  }
+  const STEP_STATE_MAP: Record<string | number, Types.StepState> = {
+    "STATE_UNSPECIFIED": Types.StepState.STATE_UNSPECIFIED,
+    "STATE_ACTIVE": Types.StepState.STATE_ACTIVE,
+    "STATE_DONE": Types.StepState.STATE_DONE,
+    "STATE_WAITING_FOR_USER": Types.StepState.STATE_WAITING_FOR_USER,
+    "STATE_ERROR": Types.StepState.STATE_ERROR,
+    "UNSPECIFIED": Types.StepState.STATE_UNSPECIFIED,
+    "ACTIVE": Types.StepState.STATE_ACTIVE,
+    "DONE": Types.StepState.STATE_DONE,
+    "WAITING_FOR_USER": Types.StepState.STATE_WAITING_FOR_USER,
+    "ERROR": Types.StepState.STATE_ERROR,
+    0: Types.StepState.STATE_UNSPECIFIED,
+    1: Types.StepState.STATE_ACTIVE,
+    2: Types.StepState.STATE_DONE,
+    3: Types.StepState.STATE_WAITING_FOR_USER,
+    4: Types.StepState.STATE_ERROR,
+  };
+  return STEP_STATE_MAP[state] ?? Types.StepState.STATE_UNSPECIFIED;
+}
+
+export function normalizeTrajectoryState(state: any): Types.TrajectoryState {
+  if (state === undefined || state === null) {
+    return Types.TrajectoryState.STATE_UNSPECIFIED;
+  }
+  const TRAJECTORY_STATE_MAP: Record<string | number, Types.TrajectoryState> = {
+    "STATE_UNSPECIFIED": Types.TrajectoryState.STATE_UNSPECIFIED,
+    "STATE_RUNNING": Types.TrajectoryState.STATE_RUNNING,
+    "STATE_IDLE": Types.TrajectoryState.STATE_IDLE,
+    "UNSPECIFIED": Types.TrajectoryState.STATE_UNSPECIFIED,
+    "RUNNING": Types.TrajectoryState.STATE_RUNNING,
+    "IDLE": Types.TrajectoryState.STATE_IDLE,
+    0: Types.TrajectoryState.STATE_UNSPECIFIED,
+    1: Types.TrajectoryState.STATE_RUNNING,
+    2: Types.TrajectoryState.STATE_IDLE,
+  };
+  return TRAJECTORY_STATE_MAP[state] ?? Types.TrajectoryState.STATE_UNSPECIFIED;
+}
+
 
 const BUILTIN_TOOL_PROTO_FIELDS: Record<string, string> = {
   [Types.BuiltinTools.CREATE_FILE]: "create_file",
@@ -242,13 +288,17 @@ function parseStepUpdate(stepDict: any): Types.Step {
 
 function readBytes(stream: Readable, length: number): Effect.Effect<Buffer, Error> {
   return Effect.async<Buffer, Error>((resume) => {
-    let buffer = Buffer.alloc(0);
+    const chunk = stream.read(length);
+    if (chunk !== null) {
+      resume(Effect.succeed(chunk));
+      return;
+    }
 
-    const onData = (chunk: Buffer) => {
-      buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length >= length) {
+    const onReadable = () => {
+      const chunk = stream.read(length);
+      if (chunk !== null) {
         cleanup();
-        resume(Effect.succeed(buffer.subarray(0, length)));
+        resume(Effect.succeed(chunk));
       }
     };
 
@@ -259,35 +309,118 @@ function readBytes(stream: Readable, length: number): Effect.Effect<Buffer, Erro
 
     const onEnd = () => {
       cleanup();
-      if (buffer.length < length) {
-        resume(
-          Effect.fail(
-            new Error(`Stream ended prematurely. Expected ${length} bytes, but got ${buffer.length}`)
-          )
-        );
-      }
+      resume(
+        Effect.fail(
+          new Error(`Stream ended prematurely. Expected ${length} bytes`)
+        )
+      );
     };
 
     const cleanup = () => {
-      stream.off("data", onData);
+      stream.off("readable", onReadable);
       stream.off("error", onError);
       stream.off("end", onEnd);
     };
 
-    stream.on("data", onData);
+    stream.on("readable", onReadable);
     stream.on("error", onError);
     stream.on("end", onEnd);
   });
 }
 
+function getBinaryPath(): string {
+  // 1. Check environment variable first
+  if (process.env.ANTIGRAVITY_HARNESS_PATH) {
+    return process.env.ANTIGRAVITY_HARNESS_PATH;
+  }
+
+  const isWindows = os.platform() === "win32";
+  const binaryNames = isWindows ? ["localharness.exe"] : ["localharness"];
+
+  // 2. Local relative package/project discovery
+  try {
+    const filename = fileURLToPath(import.meta.url);
+    const dirname = path.dirname(filename);
+
+    const possibleDirs = [
+      path.join(dirname, ".."), // From src/
+      path.join(dirname, "../.."), // From dist/
+      dirname, // direct directory
+    ];
+
+    for (const dir of possibleDirs) {
+      for (const name of binaryNames) {
+        // Check in bin/
+        const binPath = path.join(dir, "bin", name);
+        if (fs.existsSync(binPath)) {
+          return binPath;
+        }
+        // Check in scratch/
+        const scratchPath = path.join(dir, "scratch", name);
+        if (fs.existsSync(scratchPath)) {
+          return scratchPath;
+        }
+        // Check directly in dir/
+        const directPath = path.join(dir, name);
+        if (fs.existsSync(directPath)) {
+          return directPath;
+        }
+      }
+    }
+  } catch (_) {
+    // Gracefully fallback if import.meta.url or fileURLToPath fails
+  }
+
+  const home = os.homedir();
+
+  // 3. Fallbacks in user's home directories
+  for (const name of binaryNames) {
+    const localBinPath = path.join(home, ".local/bin", name);
+    if (fs.existsSync(localBinPath)) {
+      return localBinPath;
+    }
+  }
+
+  // 4. Fallback to scanning system PATH (similar to shutil.which in Python)
+  const pathEnv = process.env.PATH || "";
+  const pathDirs = pathEnv.split(path.delimiter);
+  for (const dir of pathDirs) {
+    for (const name of binaryNames) {
+      const fullPath = path.join(dir, name);
+      if (fs.existsSync(fullPath)) {
+        try {
+          fs.accessSync(fullPath, fs.constants.X_OK);
+          return fullPath;
+        } catch (_) {}
+      }
+    }
+  }
+
+  throw new Error(
+    "Could not find default localharness binary. " +
+    "Please specify binary_path explicitly, set the " +
+    "ANTIGRAVITY_HARNESS_PATH environment variable, or ensure it is in your " +
+    "PATH. Note: If you are running from the root of the repository, the " +
+    "local source tree might shadow your pip-installed package and prevent " +
+    "resource discovery."
+  );
+}
+
 function handshake(saveDir?: string): Effect.Effect<{ child: ChildProcess; port: number; apiKey: string }, Error> {
   return Effect.gen(function* () {
-    const binaryPath =
-      process.env.ANTIGRAVITY_HARNESS_PATH || "/home/jack/.gemini/antigravity-cli/bin/agentapi";
+    const binaryPath = getBinaryPath();
 
     const child = spawn(binaryPath, [], {
       stdio: ["pipe", "pipe", "pipe"],
     });
+
+    let stderrText = "";
+    if (child.stderr) {
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => {
+        stderrText += chunk;
+      });
+    }
 
     yield* Effect.async<void, Error>((resume) => {
       child.on("error", (err) => {
@@ -317,9 +450,22 @@ function handshake(saveDir?: string): Effect.Effect<{ child: ChildProcess; port:
     child.stdin.write(lenBuf);
     child.stdin.write(serializedConfig);
 
-    const lenResBuf = yield* readBytes(child.stdout, 4);
-    const resLength = lenResBuf.readUInt32LE(0);
-    const resBuf = yield* readBytes(child.stdout, resLength);
+    const readHandshake = Effect.gen(function* () {
+      const lenResBuf = yield* readBytes(child.stdout!, 4);
+      const resLength = lenResBuf.readUInt32LE(0);
+      const resBuf = yield* readBytes(child.stdout!, resLength);
+      return resBuf;
+    });
+
+    const resBufResult = yield* Effect.either(readHandshake);
+    if (resBufResult._tag === "Left") {
+      child.kill();
+      const cleanStderr = stderrText.trim();
+      return yield* Effect.fail(
+        new Error(`Failed to read length from stdout. Stderr: ${cleanStderr}`)
+      );
+    }
+    const resBuf = resBufResult.right;
     const outputConfig = decodeOutputConfig(new Uint8Array(resBuf));
 
     return { child, port: outputConfig.port, apiKey: outputConfig.apiKey };
@@ -413,6 +559,9 @@ export class LocalConnection implements Connection {
           const parts = contentList.map(toUserInputPart);
           event = { complexUserInput: { parts } };
         }
+        if (process.env.DEBUG) {
+          console.log("[WS SEND USER]", JSON.stringify(event));
+        }
         this.ws.send(JSON.stringify(event));
       },
       catch: (e) => new Error(`Failed to send message: ${e}`),
@@ -475,6 +624,9 @@ export class LocalConnection implements Connection {
       try: () => {
         for (const res of results) {
           const event: Types.InputEvent = { toolResponse: res };
+          if (process.env.DEBUG) {
+            console.log("[WS SEND TOOL]", JSON.stringify(event));
+          }
           this.ws.send(JSON.stringify(event));
         }
       },
@@ -941,6 +1093,9 @@ export class LocalConnectionStrategy implements ConnectionStrategy {
         Effect.async<void, Error>((resume) => {
           ws.on("message", (data) => {
             try {
+              if (process.env.DEBUG) {
+                console.log("[WS RECV]", data.toString());
+              }
               const event = JSON.parse(data.toString()) as Types.OutputEvent;
 
               if (event.stepUpdate) {
@@ -949,11 +1104,13 @@ export class LocalConnectionStrategy implements ConnectionStrategy {
                 const stepIdx = stepUpdate.stepIndex || 0;
                 const stepKey = `${trajId}:${stepIdx}`;
 
+                const normalizedState = normalizeStepState(stepUpdate.state);
+
                 if (!stepTrackers.has(stepKey)) {
                   stepTrackers.set(stepKey, new StepTracker());
                 }
                 const tracker = stepTrackers.get(stepKey)!;
-                tracker.updateState(stepUpdate.state || Types.StepState.STATE_UNSPECIFIED);
+                tracker.updateState(normalizedState);
 
                 const stepObj = parseStepUpdate(stepUpdate);
                 if (event.usageMetadata) {
@@ -979,7 +1136,7 @@ export class LocalConnectionStrategy implements ConnectionStrategy {
                 }
 
                 // Dispatch post-tool-call or on-tool-error hooks for pending builtin tool calls
-                if (pendingBuiltinToolCalls.has(stepKey) && stepUpdate.state === Types.StepState.STATE_DONE) {
+                if (pendingBuiltinToolCalls.has(stepKey) && normalizedState === Types.StepState.STATE_DONE) {
                   const pending = pendingBuiltinToolCalls.get(stepKey)!;
                   pendingBuiltinToolCalls.delete(stepKey);
                   if (localConn.hookRunner) {
@@ -991,7 +1148,7 @@ export class LocalConnectionStrategy implements ConnectionStrategy {
                     };
                     Effect.runFork(localConn.hookRunner.dispatchPostToolCall(pending.operationContext, result));
                   }
-                } else if (pendingBuiltinToolCalls.has(stepKey) && stepUpdate.state === Types.StepState.STATE_ERROR) {
+                } else if (pendingBuiltinToolCalls.has(stepKey) && normalizedState === Types.StepState.STATE_ERROR) {
                   const pending = pendingBuiltinToolCalls.get(stepKey)!;
                   pendingBuiltinToolCalls.delete(stepKey);
                   if (localConn.hookRunner) {
@@ -1004,7 +1161,7 @@ export class LocalConnectionStrategy implements ConnectionStrategy {
                 }
 
                 // Debounce interaction/confirmations in WAITING_FOR_USER state
-                if (stepUpdate.state === Types.StepState.STATE_WAITING_FOR_USER) {
+                if (normalizedState === Types.StepState.STATE_WAITING_FOR_USER) {
                   if (stepUpdate.questionsRequest) {
                     if (tracker.markHandled("questions_request")) {
                       Effect.runFork((localConn as any).handleQuestionRequest(stepUpdate));
@@ -1021,12 +1178,13 @@ export class LocalConnectionStrategy implements ConnectionStrategy {
               if (event.trajectoryStateUpdate) {
                 const tsu = event.trajectoryStateUpdate;
                 const isSubagent = conversationId !== "" && tsu.trajectoryId !== conversationId;
+                const normalizedState = normalizeTrajectoryState(tsu.state);
 
-                if (tsu.state === Types.TrajectoryState.STATE_RUNNING) {
+                if (normalizedState === Types.TrajectoryState.STATE_RUNNING) {
                   if (isSubagent) {
                     activeSubagents.add(tsu.trajectoryId);
                   }
-                } else if (tsu.state === Types.TrajectoryState.STATE_IDLE) {
+                } else if (normalizedState === Types.TrajectoryState.STATE_IDLE) {
                   if (isSubagent) {
                     activeSubagents.delete(tsu.trajectoryId);
                     if (localConn.hookRunner) {

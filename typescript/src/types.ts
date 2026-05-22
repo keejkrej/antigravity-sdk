@@ -88,7 +88,7 @@ export interface HarnessSideTools {
   userQuestions?: UserQuestionsConfig;
   fileEdit?: FileEditToolConfig;
   viewFile?: ViewFileToolConfig;
-  writeTo?: WriteToFileToolConfig;
+  writeToFile?: WriteToFileToolConfig;
   grepSearch?: GrepSearchToolConfig;
   listDir?: ListDirToolConfig;
   permissions?: PermissionsConfig;

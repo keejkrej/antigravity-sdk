@@ -147,7 +147,7 @@ export class Agent {
       runCommand: { enabled: activeTools.has(Types.BuiltinTools.RUN_COMMAND) },
       fileEdit: { enabled: activeTools.has(Types.BuiltinTools.EDIT_FILE) },
       viewFile: { enabled: activeTools.has(Types.BuiltinTools.VIEW_FILE) },
-      writeTo: { enabled: activeTools.has(Types.BuiltinTools.CREATE_FILE) },
+      writeToFile: { enabled: activeTools.has(Types.BuiltinTools.CREATE_FILE) },
       grepSearch: { enabled: activeTools.has(Types.BuiltinTools.SEARCH_DIR) },
       listDir: { enabled: activeTools.has(Types.BuiltinTools.LIST_DIR) },
       generateImage: {

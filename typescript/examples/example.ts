@@ -47,7 +47,7 @@ const main = Effect.gen(function* () {
   const response = yield* Effect.promise(() => agent.chat("What is 12345 * 6789? Please use your calculator tool."));
 
   console.log("\n--- Agent Response ---");
-  console.log(response.text);
+  console.log(yield* Effect.promise(() => response.text()));
   console.log("----------------------\n");
 
   console.log("Stopping agent...");
